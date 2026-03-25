@@ -9,6 +9,7 @@ import io
 
 APP_TITLE = "Admin — Banco Boi Preto"
 EXCEL_PATH = os.path.join("data", "banco_boi_preto.xlsx")
+LOCK_PATH = EXCEL_PATH + ".lock"
 SHEET_BOI_PRETO = "BoiPreto"
 SHEET_ATIVIDADES = "Atividades"
 
@@ -39,6 +40,23 @@ def main():
     if pwd != admin_password:
         st.warning("Acesso restrito.")
         st.stop()
+
+    st.subheader("Reset do banco")
+    st.warning("Essa ação apaga o arquivo Excel do banco de dados. Não tem como desfazer.")
+    confirm_reset = st.checkbox("Eu entendo e quero resetar o banco", value=False)
+    confirm_text = st.text_input('Digite "RESETAR" para confirmar')
+    if st.button("Resetar banco (apagar tudo)", type="primary", disabled=not (confirm_reset and confirm_text == "RESETAR")):
+        try:
+            if os.path.exists(EXCEL_PATH):
+                os.remove(EXCEL_PATH)
+            if os.path.exists(LOCK_PATH):
+                os.remove(LOCK_PATH)
+            st.success("Banco resetado. O próximo salvamento recriará o arquivo.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Falha ao resetar banco: {e}")
+
+    st.divider()
 
     if not os.path.exists(EXCEL_PATH):
         st.info("Ainda não existe banco salvo.")
