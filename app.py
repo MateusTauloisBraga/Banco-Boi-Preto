@@ -6,7 +6,6 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
 from filelock import FileLock
 from PIL import Image
 
@@ -35,6 +34,7 @@ COLUMNS_BOI_PRETO = [
     "Sexo",
     "Finisher",
     "Tempo Finisher Boi Preto",
+    "Transcrição",
 ]
 
 COLUMNS_ATIVIDADES = [
@@ -66,6 +66,7 @@ def load_db() -> pd.DataFrame:
             "Sexo",
             "Finisher",
             "Tempo Finisher Boi Preto",
+            "Transcrição",
             "Prova",
             "Distância",
             "Altimetria",
@@ -130,7 +131,13 @@ def fmt_hhmmss(hours: int, minutes: int, seconds: int) -> str:
 def get_openai_client():
     if OpenAI is None:
         return None
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = ""
+    try:
+        api_key = str(st.secrets.get("OPENAI_API_KEY", "")).strip()
+    except Exception:
+        api_key = ""
+    if not api_key:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         return None
     return OpenAI(api_key=api_key)
@@ -267,14 +274,25 @@ def llm_extract_rows(text: str) -> pd.DataFrame:
 Você vai receber um texto em português descrevendo provas e/ou treinos (texto não estruturado).
 Transforme em linhas de tabela.
 
+Prioridade de extração (quase sempre presentes):
+- **Nome da prova**
+- **Distância**
+- **Tempo**
+E, ocasionalmente, **Altimetria** quando houver indícios no texto.
+
 Regras:
 - Se o texto mencionar mais de uma prova/treino, retorne múltiplas linhas.
 - Colunas:
   - Prova: nome da prova/treino (ou descrição curta)
-  - Distância: valor + unidade (ex: "42 km", "21k", "70.3", "10 km")
-  - Altimetria: se for prova e você conseguir identificar no texto, preencha; senão, deixe "".
+  - Distância: valor + unidade (ex: "42 km", "21k", "27 km", "70.3", "10 km")
+  - Altimetria: ganho de elevação / elevação / D+. Se não houver, deixe "".
   - Tempo: tempo associado (ex: "1:35:20", "5h12", "DNF"). Se não houver, "".
 - NÃO invente dados. Se não estiver no texto, deixe vazio.
+
+Interpretação de termos comuns de altimetria (exemplos):
+- "ganho", "elevação", "D+", "altimetria" significam **Altimetria**.
+- Expressões como **"com mil"**, **"com 1000"**, **"com 1.000"** indicam altimetria de ~**1000 m**.
+  Ex.: "Prova WTR de 27k com mil" → Prova: "WTR", Distância: "27 km", Altimetria: "1000 m".
 
 Texto:
 \"\"\"{text}\"\"\"
@@ -369,10 +387,16 @@ def render_header():
         "Obrigado por participar! A intenção deste banco é **prever o tempo de prova** das pessoas "
         "para conseguirmos **organizar a prova de maneira mais eficiente**."
     )
+    st.markdown(
+        "**Como preencher (passo a passo):**\n"
+        "- **1)** Grave um áudio contando suas provas/treinos (ou digite o texto).\n"
+        "- **2)** Ao **parar de gravar**, a transcrição aparece automaticamente.\n"
+        "- **3)** Confira/edite a transcrição.\n"
+        "- **4)** Clique em **Gerar Tabela** — o app gera e **salva automaticamente** no banco.\n"
+    )
 
 
 def main():
-    load_dotenv()
     render_header()
 
     sexo = st.selectbox(
@@ -401,7 +425,7 @@ def main():
     st.divider()
 
     st.subheader("Conte sua experiência")
-    st.caption("Você pode digitar ou enviar um áudio (nós transcrevemos).")
+    st.caption("Grave um áudio (estilo WhatsApp) ou digite. Ao parar de gravar, transcrevemos automaticamente.")
 
     audio_recorded = None
     if hasattr(st, "audio_input"):
@@ -412,29 +436,39 @@ def main():
         # st_audiorec retorna bytes WAV (ou None)
         if audio_recorded is not None:
             st.audio(audio_recorded, format="audio/wav")
+    else:
+        st.warning("Gravação não disponível neste ambiente. Atualize o Streamlit ou habilite o componente de áudio.")
 
-    audio_uploaded = st.file_uploader(
-        "Ou envie um áudio (mp3, wav, m4a)",
-        type=["mp3", "wav", "m4a", "mpeg", "mp4"],
-        accept_multiple_files=False,
-    )
-
-    audio = audio_recorded or audio_uploaded
+    audio = audio_recorded
     if audio is not None:
-        if audio_uploaded is not None:
-            st.audio(audio_uploaded)
-        if st.button("Transcrever áudio", type="secondary"):
-            if OpenAI is None:
-                st.error("Instale `openai` para habilitar transcrição.")
-            elif not os.getenv("OPENAI_API_KEY"):
-                st.error("Configure `OPENAI_API_KEY` no `.env` para transcrever.")
-            else:
-                with st.spinner("Transcrevendo áudio..."):
+        # Auto-transcrição quando o áudio muda (parou de gravar / novo upload)
+        try:
+            audio_bytes = audio.getvalue() if hasattr(audio, "getvalue") else audio
+        except Exception:
+            audio_bytes = None
+
+        if audio_bytes:
+            audio_key = f"{len(audio_bytes)}:{hash(audio_bytes[:2048])}"
+            if st.session_state.get("last_audio_key") != audio_key:
+                st.session_state["last_audio_key"] = audio_key
+                if OpenAI is None:
+                    st.warning("Transcrição automática: instale `openai` para habilitar.")
+                else:
+                    has_key = False
                     try:
-                        st.session_state["transcription"] = llm_transcribe_audio(audio)
-                    except Exception as e:
-                        st.error(f"Falha ao transcrever: {e}")
-                st.rerun()
+                        has_key = bool(str(st.secrets.get("OPENAI_API_KEY", "")).strip())
+                    except Exception:
+                        has_key = bool(os.getenv("OPENAI_API_KEY", "").strip())
+
+                    if not has_key:
+                        st.warning("Transcrição automática: configure `OPENAI_API_KEY` nos Secrets do Streamlit Cloud.")
+                    else:
+                        with st.spinner("Transcrevendo áudio..."):
+                            try:
+                                st.session_state["transcription"] = llm_transcribe_audio(audio)
+                            except Exception as e:
+                                st.error(f"Falha ao transcrever: {e}")
+                        st.rerun()
 
     default_text = st.session_state.get("transcription", "")
     text = st.text_area(
@@ -444,14 +478,9 @@ def main():
         value=default_text,
     )
 
-    auto_altimetry = st.checkbox("Tentar buscar altimetria automaticamente (pode demorar)", value=True)
+    st.caption("A altimetria será buscada automaticamente quando possível (pode demorar).")
 
-    if OpenAI is None:
-        st.info("Instale `openai` para habilitar a extração automática pela OpenAI.")
-    elif not os.getenv("OPENAI_API_KEY"):
-        st.warning("Configure `OPENAI_API_KEY` no `.env` para habilitar a extração automática.")
-
-    if st.button("Gerar tabela", type="primary", disabled=not bool(text.strip())):
+    if st.button("Salvar Resposta", type="primary", disabled=not bool(text.strip())):
         submission_id = str(uuid.uuid4())
         created_at = datetime.now().isoformat(timespec="seconds")
 
@@ -463,59 +492,49 @@ def main():
                     "Sexo": sexo,
                     "Finisher": finisher,
                     "Tempo Finisher Boi Preto": tempo_finisher if finisher == "Sim" else "",
+                    "Transcrição": text.strip(),
                 }
             ],
             columns=COLUMNS_BOI_PRETO,
         )
         with st.spinner("Transformando seu texto em tabela..."):
             df_new = llm_extract_rows(text=text.strip())
-            if auto_altimetry:
-                df_new = llm_fill_altimetry(df_new)
+            df_new = llm_fill_altimetry(df_new)
 
         atividades = df_new.copy()
         atividades.insert(0, "Submission ID", submission_id)
         atividades = _ensure_columns(atividades, COLUMNS_ATIVIDADES)
 
-        st.session_state["boi_row"] = boi_row
-        st.session_state["df_edited"] = atividades
+        with st.spinner("Salvando no banco..."):
+            append_rows(boi_row=boi_row, atividades_rows=atividades)
 
-    if "df_edited" in st.session_state:
-        st.subheader("Prévia (edite antes de salvar)")
-        df_edited = st.data_editor(
-            st.session_state["df_edited"],
-            num_rows="dynamic",
-            use_container_width=True,
-        )
-        st.session_state["df_edited"] = df_edited
+        st.success("Dados salvos com sucesso.")
+        st.session_state["last_saved_preview_boi"] = boi_row
+        st.session_state["last_saved_preview_atv"] = atividades
+        try:
+            st.session_state["last_saved_preview_joined"] = atividades.merge(
+                boi_row[["Submission ID", "Sexo", "Finisher", "Tempo Finisher Boi Preto", "Transcrição"]],
+                on="Submission ID",
+                how="left",
+            )[
+                [
+                    "Sexo",
+                    "Finisher",
+                    "Tempo Finisher Boi Preto",
+                    "Transcrição",
+                    "Prova",
+                    "Distância",
+                    "Altimetria",
+                    "Tempo",
+                ]
+            ]
+        except Exception:
+            st.session_state["last_saved_preview_joined"] = atividades
+        st.session_state.pop("transcription", None)
 
-        colA, colB = st.columns([1, 2])
-        with colA:
-            validate_ok = st.checkbox("Excel está OK (validar e salvar)", value=False)
-        with colB:
-            correction_prompt = st.text_input("Se não estiver OK, descreva a correção (prompt)")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Aplicar correção pelo prompt", disabled=not bool(correction_prompt.strip())):
-                with st.spinner("Aplicando correções..."):
-                    fixed = llm_apply_correction_prompt(
-                        st.session_state["df_edited"][["Prova", "Distância", "Altimetria", "Tempo"]],
-                        correction_prompt.strip(),
-                    )
-                    fixed.insert(0, "Submission ID", st.session_state["df_edited"]["Submission ID"].iloc[0])
-                    st.session_state["df_edited"] = _ensure_columns(fixed, COLUMNS_ATIVIDADES)
-                st.rerun()
-
-        with c2:
-            if st.button("Salvar no Excel (adicionar)", disabled=not validate_ok):
-                boi_row = st.session_state.get("boi_row")
-                atividades_rows = st.session_state["df_edited"].copy()
-                with st.spinner("Salvando..."):
-                    append_rows(boi_row=boi_row, atividades_rows=atividades_rows)
-                st.success("Salvo com sucesso (dados adicionados ao Excel).")
-                st.session_state.pop("df_edited", None)
-                st.session_state.pop("boi_row", None)
-                st.session_state.pop("transcription", None)
+    if "last_saved_preview_boi" in st.session_state and "last_saved_preview_atv" in st.session_state:
+        st.subheader("Resposta salva")
+        st.dataframe(st.session_state.get("last_saved_preview_joined"), use_container_width=True)
 
     st.divider()
     st.info("Para acessar o banco completo (visualizar/baixar), use a aba **Admin**.")

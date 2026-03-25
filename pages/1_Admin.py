@@ -56,13 +56,15 @@ def main():
     try:
         boi = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_BOI_PRETO)
     except Exception:
-        boi = pd.DataFrame(columns=["Submission ID", "Criado em", "Sexo", "Finisher", "Tempo Finisher Boi Preto"])
+        boi = pd.DataFrame(
+            columns=["Submission ID", "Criado em", "Sexo", "Finisher", "Tempo Finisher Boi Preto", "Transcrição"]
+        )
     try:
         atv = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_ATIVIDADES)
     except Exception:
         atv = pd.DataFrame(columns=["Submission ID", "Prova", "Distância", "Altimetria", "Tempo"])
 
-    for col in ["Submission ID", "Criado em", "Sexo", "Finisher", "Tempo Finisher Boi Preto"]:
+    for col in ["Submission ID", "Criado em", "Sexo", "Finisher", "Tempo Finisher Boi Preto", "Transcrição"]:
         if col not in boi.columns:
             boi[col] = ""
     for col in ["Submission ID", "Prova", "Distância", "Altimetria", "Tempo"]:
